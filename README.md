@@ -6,7 +6,12 @@ Distributed Streaming Graph Partitioning (C/MPI)
 GraSP should build (using make) given a stable installation of MPI. 
 METIS must be installed to use the ParMETIS benchmarking code.
 
-mpirun -np 64 ./graph500_part_test 18 16
+The MPI implementation of GraSP will create a number of partitions equal to the number of MPI processes passed to it.
+By default GraSP will generate a power-law graph using the Graph500 generator.
+
+A 64-partition of a Kronecker graph with 2^18 vertices (and 16*2^18 edges) is called via the following:
+
+mpirun -np 64 ./grasp_test 18 16
 
 ### Third-Party Code
 This code includes scaffolding and a graph generator from the Graph 500 reference code by Lumsdaine and Willcock. 
