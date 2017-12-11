@@ -1,5 +1,5 @@
 CFLAGS = -g -O3 -Wchar-subscripts -Drestrict=__restrict__ -Wall -ffast-math -DGRAPH_GENERATOR_MPI # -g -pg
-LDFLAGS = -fopenmp -g # -g -pg
+LDFLAGS = -g # -g -pg
 MPICC = mpicc
 
 all: grasp_test

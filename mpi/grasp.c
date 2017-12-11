@@ -89,7 +89,6 @@ void partition_graph_data_structure() {
   int64_t emptyverts = 0;
   num_hi_deg_verts = 0;
   PART_TYPE randidx;
-  int cutoff = F_CUTOFF;
   size_t *row;
   size_t vert;
   size_t k,  nnz_row, best_part;
@@ -151,7 +150,7 @@ void partition_graph_data_structure() {
       }
     }
     else {
-      alpha *= ALPHA_EXP_RATE;
+      // alpha *= ALPHA_EXP_RATE;
       for (i = 0; i < n_local; ++i) {
         memset(partscore, 0, nparts * sizeof(int64_t));
         memset(partcost, 0, nparts * sizeof(int64_t));
@@ -248,7 +247,7 @@ void partition_graph_data_structure() {
     }
 
     if (1) {//(repeat_run % 2 == 0 && repeat_run > 0 || SANITY) {
-      mpi_compute_cut(rowptr, colidx, parts, nparts, n_local, offset, cutoff);
+      mpi_compute_cut(rowptr, colidx, parts, nparts, n_local, offset);
     }
   }
   double streamstop= MPI_Wtime();
@@ -323,13 +322,17 @@ float calc_dc(float alpha, float gamma, int64_t len) {
   return (alpha*pow(len + F_DELTA ,gamma)) - (alpha*pow(len,gamma));
 }
 
-int64_t mpi_compute_cut(size_t *rowptr, int64_t *colidx, PART_TYPE* parts, int nparts, int64_t n_local, int64_t offset, int cutoff) {
+int64_t mpi_compute_cut(size_t *rowptr, int64_t *colidx, PART_TYPE* parts, int nparts, int64_t n_local, int64_t offset) {
   size_t vert;
   int64_t nnz_row;
   int64_t v_part;
   int64_t cutedges = 0;
   int64_t mytotedges = 0;
   int64_t mytotlodegedges = 0;
+
+  size_t *cuts_per_part = (size_t*)malloc(nparts * sizeof(size_t));
+  for (int i=0; i<nparts; i++) { cuts_per_part[i] = 0; }
+
   size_t *row;
   int64_t i;
   size_t k;
@@ -339,29 +342,38 @@ int64_t mpi_compute_cut(size_t *rowptr, int64_t *colidx, PART_TYPE* parts, int n
     vert = i;
     row = &rowptr[vert];
     nnz_row = (int64_t)(*(row+1) - *(row)); //nnz in row
-    if (nnz_row < cutoff) { 
-      v_part = parts[vert+offset];
-      if (v_part == -1) {
-        v_part = 0;
-        emptyparts++;
-      }
-      // count edges to other partitions
-      for (k = *row; k < ((*row)+nnz_row); ++k) {
-        int64_t node = colidx[k];
-        int64_t node_owner = VERTEX_OWNER(node);
-        int64_t node_local_idx = VERTEX_LOCAL(node);
-        int64_t parts_idx = node_owner*g.nlocalverts + node_local_idx;
-        if (parts[parts_idx] < nparts) { mytotlodegedges++; } //count low degree edges
-        if (parts[parts_idx] != v_part && parts[parts_idx] < nparts) { cutedges++; } //count low degree cut edges
-      }
+    v_part = parts[vert+offset];
+    if (v_part == -1) {
+      v_part = 0;
+      emptyparts++;
+    }
+    // count edges to other partitions
+    for (k = *row; k < ((*row)+nnz_row); ++k) {
+      int64_t node = colidx[k];
+      int64_t node_owner = VERTEX_OWNER(node);
+      int64_t node_local_idx = VERTEX_LOCAL(node);
+      int64_t parts_idx = node_owner*g.nlocalverts + node_local_idx;
+      if (parts[parts_idx] < nparts) { mytotlodegedges++; } //count low degree edges
+      if (parts[parts_idx] != v_part && parts[parts_idx] < nparts) { cutedges++; cuts_per_part[v_part]++; } 
     }
   }
   int64_t tot_cutedges;
   int64_t tot_lodegedges;
   MPI_Allreduce(&cutedges, &tot_cutedges, 1, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD);
   MPI_Allreduce(&mytotlodegedges, &tot_lodegedges, 1, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD);
-  //fprintf(stdout,"offset: %d emptyparts = %d cutedges = %d totcutedges = %d tot edges=%d mylodegedges=%d totlodegedges=%d\n",offset, emptyparts,cutedges,tot_cutedges,mytotedges,mytotlodegedges,tot_lodegedges);
+  // fprintf(stdout,"offset: %d emptyparts = %d cutedges = %d totcutedges = %d tot edges=%d mylodegedges=%d totlodegedges=%d\n",offset, emptyparts,cutedges,tot_cutedges,mytotedges,mytotlodegedges,tot_lodegedges);
   if (rank == 0) {   fprintf(stdout,"total cutedges = %" PRId64 ", pct of total:%f pct of worstcase:%f \n", tot_cutedges, (float)tot_cutedges/tot_lodegedges, ((float)tot_cutedges/tot_lodegedges)/((float)(nparts-1)/nparts)); }
+
+  MPI_Allreduce(MPI_IN_PLACE, cuts_per_part, nparts, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD);
+
+  if(rank==0) {
+    fprintf (stdout, "Cuts/part: ");
+    for (int i=0; i<nparts; i++) {
+        fprintf (stdout, " [%d: %d] ",i,cuts_per_part[i]);
+    }
+    fprintf (stdout, "\n");
+  }
+
   return tot_cutedges;
 }
 

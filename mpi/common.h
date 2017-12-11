@@ -191,7 +191,7 @@ void apply_permutation_mpi(MPI_Comm comm, const int64_t local_perm_size, const i
 int print_parts(FILE* out, PART_TYPE* parts, int n, int n_local);
 int print_graph_tuple(FILE* out, tuple_graph* tg, int rank);
 int print_graph_csr(FILE* out, size_t *rowptr, int64_t *colidx, int n_local);
-int64_t mpi_compute_cut(size_t *rowptr, int64_t *colidx, PART_TYPE *parts, int nparts, int64_t n_local, int64_t offset, int cutoff);
+int64_t mpi_compute_cut(size_t *rowptr, int64_t *colidx, PART_TYPE *parts, int nparts, int64_t n_local, int64_t offset);
 int64_t* genRandPerm(int64_t* orderList, int64_t size);
 void shuffle_int(int64_t *list, int len);
 int irand(int n);
