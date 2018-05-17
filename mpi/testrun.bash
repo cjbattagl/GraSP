@@ -1,2 +1,2 @@
 make
-mpirun -np 64 ./graph500_part_test 18 16
+mpirun -np 8 ./graph500_part_test 10 16

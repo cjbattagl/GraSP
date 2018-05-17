@@ -13,13 +13,20 @@
 #include <time.h>
 #include <math.h>
 
-static int64_t* g_perm;
-static PART_TYPE* parts;
 static oned_csr_graph g;
+
+static PART_TYPE* parts;
+
+static int64_t* g_perm;
 static int64_t* g_oldq;
 static int64_t* g_newq;
+
 static unsigned long* g_visited;
+
+// Used to coarsen communication
 static const int coalescing_size = 256;
+
+// Collective communication variables
 static int64_t* g_outgoing;
 static size_t* g_outgoing_counts /* 2x actual count */;
 static MPI_Request* g_outgoing_reqs;
@@ -28,49 +35,13 @@ static int64_t* g_recvbuf;
 
 static int64_t num_hi_deg_verts;
 
-void free_graph_data_structure(void) {
-  free_oned_csr_graph(&g);
-}
-
-void make_graph_data_structure(const tuple_graph* const tg) {
-  convert_graph_to_oned_csr(tg, &g);
-}
-
-void remake_graph_data_structure(const tuple_graph* const tg) {
-  convert_graph_to_oned_csr(tg, &g);
-  const size_t nlocalverts = g.nlocalverts;
-  g_oldq = (int64_t*)xmalloc(nlocalverts * sizeof(int64_t));
-  g_newq = (int64_t*)xmalloc(nlocalverts * sizeof(int64_t));
-  const int ulong_bits = sizeof(unsigned long) * CHAR_BIT;
-  int64_t visited_size = (nlocalverts + ulong_bits - 1) / ulong_bits;
-  g_visited = (unsigned long*)xmalloc(visited_size * sizeof(unsigned long));
-  g_outgoing = (int64_t*)xMPI_Alloc_mem(coalescing_size * size * 2 * sizeof(int64_t));
-  g_outgoing_counts = (size_t*)xmalloc(size * sizeof(size_t)) /* 2x actual count */;
-  g_outgoing_reqs = (MPI_Request*)xmalloc(size * sizeof(MPI_Request));
-  g_outgoing_reqs_active = (int*)xmalloc(size * sizeof(int));
-  g_recvbuf = (int64_t*)xMPI_Alloc_mem(coalescing_size * 2 * sizeof(int64_t));
-}
-
-int64_t get_permed_vertex(int64_t id) { 
-  return ((g_perm[id] % g.nlocalverts) * size + floor(g_perm[id]/(g.nglobalverts/size))); 
-}
-
-void print_graph() {
-    char filename[256];
-    sprintf(filename, "out_pcsr%02d.mat", rank);
-    FILE *GraphFile;
-    GraphFile = fopen(filename, "w");
-    assert(GraphFile != NULL);
-    print_graph_csr(GraphFile, g.rowstarts, g.column, g.nlocalverts);
-    MPI_Barrier(MPI_COMM_WORLD);
-    fclose(GraphFile);
-}
-
 void partition_graph_data_structure() { 
   size_t n = g.nglobalverts;
   size_t n_local = g.nlocalverts;
   size_t offset = g.nlocalverts * rank; //!//Does this work?
+
   int nparts = size;
+
   int64_t tot_nnz = 0;
   parts = (PART_TYPE*)malloc(n * sizeof(PART_TYPE));
   int64_t *partsize_update = (int64_t*)malloc(nparts * sizeof(int64_t));
@@ -86,12 +57,13 @@ void partition_graph_data_structure() {
   int64_t *vorder = (int64_t*)malloc(n_local * sizeof(int64_t)); 
 
   PART_TYPE oldpart;
+  PART_TYPE randidx;
+
   int64_t emptyverts = 0;
   num_hi_deg_verts = 0;
-  PART_TYPE randidx;
   size_t *row;
   size_t vert;
-  size_t k,  nnz_row, best_part;
+  size_t k,  mydegree, best_part;
   int64_t *colidx = g.column;
   size_t *rowptr = g.rowstarts;
   float curr_score, best_score;
@@ -113,6 +85,7 @@ void partition_graph_data_structure() {
 
   //memset(parts, -1, n * sizeof(PART_TYPE));
 
+  // Initialize partition stats
   for (l=0; l<nparts; ++l) {
     partsize[l] = 0;
     old_partsize[l] = 0;
@@ -134,33 +107,34 @@ void partition_graph_data_structure() {
   double streamtime = 0;
   genRandPerm(vorder, n_local);
 
-  double streamstart= MPI_Wtime();
+  double streamstart = MPI_Wtime();
   for (repeat_run = 0; repeat_run < NUM_STREAMS; repeat_run++) {
-    //First run: initialize with hashed partition
+
+    //First run: initialize with hashed (random) partition
     if (repeat_run == 0) {
       for (i = 0; i < n_local; ++i) {
         vert = (size_t)vorder[i];
         row = &rowptr[vert];
-        nnz_row = *(row+1) - *row;
+        mydegree = *(row+1) - *row;
         local_idx = offset + vert; 
         randidx = (PART_TYPE)irand(nparts);
         parts[local_idx] = randidx;
         partsize[randidx]++;
-        partnnz[randidx] += nnz_row;
+        partnnz[randidx] += mydegree;
       }
     }
     else {
-      // alpha *= ALPHA_EXP_RATE;
+      alpha *= ALPHA_EXP_RATE;
       for (i = 0; i < n_local; ++i) {
         memset(partscore, 0, nparts * sizeof(int64_t));
         memset(partcost, 0, nparts * sizeof(int64_t));
         vert = (size_t)vorder[i];
         local_idx = offset + vert; //VERTEX_LOCAL(global_vert_idx);
         row = &rowptr[vert];
-        nnz_row = *(row+1) - *row;
+        mydegree = *(row+1) - *row;
         oldpart = -1;
-        if(nnz_row > 0) {
-          for (k = *row; k < ((*row)+nnz_row); ++k) {
+        if(mydegree > 0) {
+          for (k = *row; k < ((*row)+mydegree); ++k) {
             parts_idx = VERTEX_OWNER(colidx[k])*g.nlocalverts + VERTEX_LOCAL(colidx[k]);
             PART_TYPE node_part = parts[parts_idx]; /////
             if (parts[parts_idx] >= 0) { partscore[node_part]++; }
@@ -174,8 +148,8 @@ void partition_graph_data_structure() {
           }
           oldpart = parts[local_idx];
           parts[local_idx] = best_part;
-          partsize[best_part]++; partnnz[best_part]+=nnz_row;
-          if (oldpart >= 0 && oldpart < nparts) { partsize[oldpart]--; partnnz[oldpart]-=nnz_row; }
+          partsize[best_part]++; partnnz[best_part]+=mydegree;
+          if (oldpart >= 0 && oldpart < nparts) { partsize[oldpart]--; partnnz[oldpart]-=mydegree; }
         } 
 #if 0
         else { // empty vertex, assign randomly
@@ -184,7 +158,7 @@ void partition_graph_data_structure() {
             randidx = (PART_TYPE)irand(nparts);
             oldpart = parts[local_idx];
             parts[local_idx] = randidx; partsize[randidx]++;
-            if (oldpart >= 0 && oldpart < nparts) { partsize[oldpart]--; partnnz[oldpart]-=nnz_row; }
+            if (oldpart >= 0 && oldpart < nparts) { partsize[oldpart]--; partnnz[oldpart]-=mydegree; }
           }
         }
 #endif
@@ -324,7 +298,7 @@ float calc_dc(float alpha, float gamma, int64_t len) {
 
 int64_t mpi_compute_cut(size_t *rowptr, int64_t *colidx, PART_TYPE* parts, int nparts, int64_t n_local, int64_t offset) {
   size_t vert;
-  int64_t nnz_row;
+  int64_t mydegree;
   int64_t v_part;
   int64_t cutedges = 0;
   int64_t mytotedges = 0;
@@ -341,14 +315,14 @@ int64_t mpi_compute_cut(size_t *rowptr, int64_t *colidx, PART_TYPE* parts, int n
   for (i = 0; i < n_local; i++) {
     vert = i;
     row = &rowptr[vert];
-    nnz_row = (int64_t)(*(row+1) - *(row)); //nnz in row
+    mydegree = (int64_t)(*(row+1) - *(row)); //nnz in row
     v_part = parts[vert+offset];
     if (v_part == -1) {
       v_part = 0;
       emptyparts++;
     }
     // count edges to other partitions
-    for (k = *row; k < ((*row)+nnz_row); ++k) {
+    for (k = *row; k < ((*row)+mydegree); ++k) {
       int64_t node = colidx[k];
       int64_t node_owner = VERTEX_OWNER(node);
       int64_t node_local_idx = VERTEX_LOCAL(node);
@@ -377,6 +351,41 @@ int64_t mpi_compute_cut(size_t *rowptr, int64_t *colidx, PART_TYPE* parts, int n
   return tot_cutedges;
 }
 
+void free_graph_data_structure(void) { free_oned_csr_graph(&g); }
+
+void make_graph_data_structure(const tuple_graph* const tg) { convert_graph_to_oned_csr(tg, &g); }
+
+void remake_graph_data_structure(const tuple_graph* const tg) {
+  convert_graph_to_oned_csr(tg, &g);
+  const size_t nlocalverts = g.nlocalverts;
+  g_oldq = (int64_t*)xmalloc(nlocalverts * sizeof(int64_t));
+  g_newq = (int64_t*)xmalloc(nlocalverts * sizeof(int64_t));
+  const int ulong_bits = sizeof(unsigned long) * CHAR_BIT;
+  int64_t visited_size = (nlocalverts + ulong_bits - 1) / ulong_bits;
+  g_visited = (unsigned long*)xmalloc(visited_size * sizeof(unsigned long));
+  g_outgoing = (int64_t*)xMPI_Alloc_mem(coalescing_size * size * 2 * sizeof(int64_t));
+  g_outgoing_counts = (size_t*)xmalloc(size * sizeof(size_t)) /* 2x actual count */;
+  g_outgoing_reqs = (MPI_Request*)xmalloc(size * sizeof(MPI_Request));
+  g_outgoing_reqs_active = (int*)xmalloc(size * sizeof(int));
+  g_recvbuf = (int64_t*)xMPI_Alloc_mem(coalescing_size * 2 * sizeof(int64_t));
+}
+
+int64_t get_permed_vertex(int64_t id) { 
+  return ((g_perm[id] % g.nlocalverts) * size + floor(g_perm[id]/(g.nglobalverts/size))); 
+}
+
+void print_graph() {
+    char filename[256];
+    sprintf(filename, "out_pcsr%02d.mat", rank);
+    FILE *GraphFile;
+    GraphFile = fopen(filename, "w");
+    assert(GraphFile != NULL);
+    print_graph_csr(GraphFile, g.rowstarts, g.column, g.nlocalverts);
+    MPI_Barrier(MPI_COMM_WORLD);
+    fclose(GraphFile);
+}
+
+// Print tuple graph as tuples
 int print_graph_tuple(FILE* out, tuple_graph* tg, int rank) {
   int64_t v0, v1;
   packed_edge* result = tg->edgememory;
@@ -391,6 +400,7 @@ int print_graph_tuple(FILE* out, tuple_graph* tg, int rank) {
   return 1;
 }
 
+// Print CSR graph as tuples
 int print_graph_csr(FILE* out, size_t *rowptr, int64_t *colidx, int n_local) {
   int i, k;
   int64_t src, dst;
@@ -405,6 +415,7 @@ int print_graph_csr(FILE* out, size_t *rowptr, int64_t *colidx, int n_local) {
   return 1;
 }
 
+// Print out the partition that each node belongs to
 int print_parts(FILE* out, PART_TYPE* parts, int n, int n_local) {
   int i;
   for (i=0; i<n; ++i) {

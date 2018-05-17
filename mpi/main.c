@@ -255,7 +255,7 @@ int main(int argc, char** argv) {
   //fprintf(stderr, "max = %" PRId64 "\n", (int64_t)tg.max_edgememory_size);
 
   ////////// 2. CONVERT TO CSR  /////////////////
-  /* Make user's graph data structure. */
+  // ( Make user's graph data structure )
   double data_struct_start = MPI_Wtime();
   make_graph_data_structure(&tg);
   double data_struct_stop = MPI_Wtime();
